@@ -15,12 +15,11 @@
 // use cudarc::driver::result::device;
 use cudarc::driver::{CudaDevice, DeviceRepr, DriverError, LaunchAsync, LaunchConfig};
 use cudarc::nvrtc::Ptx;
-use rayon::vec;
-use std::fmt::format;
+
 use std::str::FromStr;
 use std::time::Instant;
-// use std::vec;
 
+use rayon::prelude::*;
 mod sketch;
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
@@ -36,10 +35,23 @@ include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 const CUDA_KERNEL_MY_STRUCT: &str = include_str!(concat!(env!("OUT_DIR"), "/my_struct_kernel.ptx"));
 
 fn main() -> Result<(), DriverError> {
-    let path_fna = String::from_str("../../genome-HD/dna-dataset/D1_100").unwrap();
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(16)
+        .build_global()
+        .unwrap();
+
+    let path_fna = String::from_str("../../genome-HD/dna-dataset/D1").unwrap();
     // let path_fna = String::from_str("./test").unwrap();
     let ksize = 21;
-    let scaled = 2000;
+    let scaled = 1000;
+
+    let now = Instant::now();
+    let sketch_hash_gpu_par = sketch::sketch_cuda_parallel(&path_fna, ksize, scaled);
+    println!(
+        "Time taken to call sketch on {} : {:.2?}",
+        "gpu-parallel",
+        now.elapsed()
+    );
 
     let now = Instant::now();
     let sketch_hash_gpu = sketch::sketch_cuda(&path_fna, ksize, scaled);
@@ -48,6 +60,20 @@ fn main() -> Result<(), DriverError> {
         "gpu",
         now.elapsed()
     );
+
+    assert_eq!(sketch_hash_gpu.len(), sketch_hash_gpu_par.len());
+    for i in 0..sketch_hash_gpu.len() {
+        // let mut vec_gpu: Vec<u64> = sketch_hash_gpu[i].clone().into_iter().collect();
+        // vec_gpu.sort();
+        // let mut vec_gpu_par: Vec<u64> = sketch_hash_gpu_par[i].clone().into_iter().collect();
+        // vec_gpu_par.sort();
+        // assert_eq!(vec_gpu, vec_gpu_par, "{}-th file", i);
+
+        // assert_eq!(sketch_hash_gpu[i].len(), sketch_hash_gpu_par[i].len());
+        let overlap = sketch_hash_gpu[i].intersection(&sketch_hash_gpu_par[i]);
+        let overlap = overlap.count() as f32 / sketch_hash_gpu[i].len() as f32;
+        assert!(overlap > 0.999);
+    }
 
     let now = Instant::now();
     let sketch_hash_cpu = sketch::sketch(&path_fna, ksize, scaled);

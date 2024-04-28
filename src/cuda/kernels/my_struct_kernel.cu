@@ -59,7 +59,7 @@ my_struct_kernel(char *seq, const size_t n, const size_t n_per_thread,
             kmer_hash = mmhash_u64(cur_kmer_fwd);
           }
 
-          if (kmer_hash < threshold)
+          if (kmer_hash < threshold && cnt < n_hash_per_thread)
             kmer_scaled_hash[tid * n_hash_per_thread + (cnt++)] = kmer_hash;
         }
       } else {

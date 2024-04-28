@@ -1,14 +1,13 @@
-use glob::glob;
-use std::default;
-use std::hash::Hash;
+use std::cmp::max;
+use std::path::Path;
 use std::time::Instant;
-use std::{path::Path, sync::Arc};
 
 use std::collections::HashSet;
 
+use glob::glob;
 use indicatif::{ProgressBar, ProgressStyle};
-// use rayon::prelude::*;
-use seq_io::fasta::{Reader, Record};
+use rayon::prelude::*;
+use seq_io::fasta::Reader;
 
 use needletail::{parse_fastx_file, Sequence};
 
@@ -192,7 +191,6 @@ pub fn sketch_cuda(path_fna: &String, ksize: usize, scaled: u64) -> Vec<HashSet<
     let f = gpu.get_func("my_module", "my_struct_kernel").unwrap();
 
     // start sketching
-    let now = Instant::now();
     for i in 0..n_files {
         let mut fastx_reader = Reader::from_path(files[i].as_ref().unwrap()).unwrap();
 
@@ -280,7 +278,124 @@ pub fn sketch_cuda(path_fna: &String, ksize: usize, scaled: u64) -> Vec<HashSet<
 
     pb.finish();
 
-    println!("Time taken to execute cuda kernels: {:.2?}", now.elapsed());
+    sketch_kmer_sets
+}
+
+pub fn sketch_cuda_parallel(path_fna: &String, ksize: usize, scaled: u64) -> Vec<HashSet<u64>> {
+    // get files
+    let files: Vec<_> = glob(Path::new(&path_fna).join("*.fna").to_str().unwrap())
+        .expect("Failed to read glob pattern")
+        .collect();
+
+    // progress bar
+    let pb = ProgressBar::new(files.len() as u64);
+
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{wide_bar} Elapsed: {elapsed_precise}, ETA: {eta_precise}")
+            .unwrap()
+            .progress_chars("##-"),
+    );
+
+    // setup GPU device
+    let now = Instant::now();
+    let gpu = CudaDevice::new(0).unwrap();
+    println!("Time taken to initialise CUDA: {:.2?}", now.elapsed());
+
+    // compile ptx
+    let now = Instant::now();
+    let ptx = Ptx::from_src(CUDA_KERNEL_MY_STRUCT);
+    gpu.load_ptx(ptx, "my_module", &["my_struct_kernel"])
+        .unwrap();
+    let gpu = &gpu;
+    println!("Time taken to compile and load PTX: {:.2?}", now.elapsed());
+
+    // start sketching
+    // Option 1
+    let index_vec: Vec<usize> = (0..files.len()).collect();
+    let sketch_kmer_sets: Vec<HashSet<u64>> = index_vec
+        .par_iter()
+        .map(|i| {
+            // NOTE: this is the important call to have
+            // without this, you'll get a CUDA_ERROR_INVALID_CONTEXT
+            gpu.bind_to_thread().unwrap();
+
+            // gpu.fork_default_stream();
+
+            let mut fastx_reader = Reader::from_path(files[*i].as_ref().unwrap()).unwrap();
+
+            // let now = Instant::now();
+
+            let mut fna_seqs = Vec::<u8>::new();
+            while let Some(record) = fastx_reader.next() {
+                let seqrec = record.unwrap();
+                let mut seq_i = seqrec.owned_seq();
+                seq_i.push(b'N');
+                fna_seqs.append(&mut seq_i);
+            }
+            // println!("Time taken to extract seq: {:.2?}", now.elapsed());
+
+            let n_bps = fna_seqs.len();
+            let n_kmers = n_bps - ksize + 1;
+            let bp_per_thread = 1024;
+            let n_threads = (n_kmers + bp_per_thread - 1) / bp_per_thread;
+
+            // copy to GPU
+            // let now = Instant::now();
+
+            let gpu_seq = gpu.htod_copy(fna_seqs.clone()).unwrap();
+            let gpu_seq_nt4_table = gpu.htod_copy(SEQ_NT4_TABLE.to_vec()).unwrap();
+            // allocate 4x more space that expected
+            let n_hash_per_thread = max(bp_per_thread / scaled as usize * 3, 8);
+            let n_hash_array = n_hash_per_thread * n_threads;
+            let gpu_kmer_bit_packed = gpu.alloc_zeros::<u64>(n_hash_array).unwrap();
+
+            // println!("Time taken to copy to gpu: {:.2?}", now.elapsed());
+
+            // execute kernel
+            // let now = Instant::now();
+
+            let config = LaunchConfig::for_num_elems(n_threads as u32);
+            let params = (
+                &gpu_seq,
+                n_bps,
+                bp_per_thread,
+                n_hash_per_thread,
+                ksize,
+                u64::MAX / scaled,
+                true,
+                &gpu_seq_nt4_table,
+                &gpu_kmer_bit_packed,
+            );
+            let f = gpu.get_func("my_module", "my_struct_kernel").unwrap();
+            unsafe { f.clone().launch(config, params) }.unwrap();
+
+            // println!("Time taken to execute kernel: {:.2?}", now.elapsed());
+
+            // let now = Instant::now();
+
+            // let host_seq = gpu.sync_reclaim(gpu_seq).unwrap();
+            let host_kmer_bit_packed = gpu.sync_reclaim(gpu_kmer_bit_packed).unwrap();
+
+            // println!("Time taken to copy from gpu: {:.2?}", now.elapsed());
+
+            // let now = Instant::now();
+
+            let mut sketch_kmer_set = HashSet::<u64>::default();
+            for h in host_kmer_bit_packed {
+                if h != 0 {
+                    sketch_kmer_set.insert(h);
+                }
+            }
+
+            // println!("Time taken to postprocess: {:.2?}", now.elapsed());
+            pb.inc(1);
+            pb.eta();
+            sketch_kmer_set
+        })
+        .collect();
+
+    pb.finish();
 
     sketch_kmer_sets
 }
