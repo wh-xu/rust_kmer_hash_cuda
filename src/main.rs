@@ -12,57 +12,101 @@
 //!
 //! There are two files in this example: `main.rs` and `build.rs`. You can reference them and add to your project accordingly. The `cuda` folder in this example gives a simple example of defining structs in a separate header, including creating a `wrapper.h` header for `bindgen`
 
+// use cudarc::driver::result::device;
 use cudarc::driver::{CudaDevice, DeviceRepr, DriverError, LaunchAsync, LaunchConfig};
 use cudarc::nvrtc::Ptx;
+use rayon::vec;
+use std::fmt::format;
+use std::str::FromStr;
 use std::time::Instant;
+// use std::vec;
+
+mod sketch;
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
-unsafe impl DeviceRepr for MyStruct {}
-impl Default for MyStruct {
-    fn default() -> Self {
-        Self { data: [0.0; 4] }
-    }
-}
+// unsafe impl DeviceRepr for MyStruct {}
+// impl Default for MyStruct {
+//     fn default() -> Self {
+//         Self { data: [0.0; 4] }
+//     }
+// }
 
 // include the compiled PTX code as string
 const CUDA_KERNEL_MY_STRUCT: &str = include_str!(concat!(env!("OUT_DIR"), "/my_struct_kernel.ptx"));
 
 fn main() -> Result<(), DriverError> {
+    let path_fna = String::from_str("../../genome-HD/dna-dataset/D1_100").unwrap();
+    // let path_fna = String::from_str("./test").unwrap();
+    let ksize = 21;
+    let scaled = 2000;
+
+    let now = Instant::now();
+    let sketch_hash_gpu = sketch::sketch_cuda(&path_fna, ksize, scaled);
+    println!(
+        "Time taken to call sketch on {} : {:.2?}",
+        "gpu",
+        now.elapsed()
+    );
+
+    let now = Instant::now();
+    let sketch_hash_cpu = sketch::sketch(&path_fna, ksize, scaled);
+    println!(
+        "Time taken to call sketch on {} : {:.2?}",
+        "cpu",
+        now.elapsed()
+    );
+
+    assert_eq!(sketch_hash_cpu.len(), sketch_hash_gpu.len());
+    for i in 0..sketch_hash_cpu.len() {
+        let mut vec_cpu: Vec<u64> = sketch_hash_cpu[i].clone().into_iter().collect();
+        vec_cpu.sort();
+        let mut vec_gpu: Vec<u64> = sketch_hash_gpu[i].clone().into_iter().collect();
+        vec_gpu.sort();
+
+        // for j in 0..vec_cpu.len() {
+        //     assert_eq!(
+        //         vec_cpu[j],
+        //         vec_gpu[j],
+        //         "{}-th file {}-th val -> {} {}", i, j, vec_cpu[j], vec_gpu[j]
+        //     );
+        // }
+        // assert_eq!(vec_cpu, vec_gpu, "{}-th file", i);
+    }
+
+    return Ok(());
+
     // setup GPU device
     let now = Instant::now();
-
     let gpu = CudaDevice::new(0)?;
     println!("Time taken to initialise CUDA: {:.2?}", now.elapsed());
 
     // compile ptx
     let now = Instant::now();
-
     let ptx = Ptx::from_src(CUDA_KERNEL_MY_STRUCT);
     gpu.load_ptx(ptx, "my_module", &["my_struct_kernel"])?;
     println!("Time taken to compile and load PTX: {:.2?}", now.elapsed());
 
     // create data
     let now = Instant::now();
-
-    let n = 10_usize;
-    let my_structs = vec![MyStruct { data: [1.0; 4] }; n];
+    // let n = 10_usize;
+    // let my_structs = vec![MyStruct { data: [1.0; 4] }; n];
+    let seq = Vec::from("AAAGGGTTTCCCGG");
+    let n = seq.len();
 
     // copy to GPU
-    let gpu_my_structs = gpu.htod_copy(my_structs)?;
+    let gpu_seq = gpu.htod_copy(seq)?;
     println!("Time taken to initialise data: {:.2?}", now.elapsed());
 
     let now = Instant::now();
-
     let f = gpu.get_func("my_module", "my_struct_kernel").unwrap();
 
-    unsafe { f.launch(LaunchConfig::for_num_elems(n as u32), (&gpu_my_structs, n)) }?;
-
+    unsafe { f.launch(LaunchConfig::for_num_elems(n as u32), (&gpu_seq, n)) }?;
     println!("Time taken to call kernel: {:.2?}", now.elapsed());
 
-    let my_structs = gpu.sync_reclaim(gpu_my_structs)?;
+    let host_seq = gpu.sync_reclaim(gpu_seq)?;
 
-    assert!(my_structs.iter().all(|i| i.data == [2.0; 4]));
-
+    println!("{:?}", String::from_utf8(host_seq).unwrap());
+    // assert!(my_structs.iter().all(|i| i.data == [2.0; 4]));
     Ok(())
 }
