@@ -13,8 +13,8 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
     // build the cuda kernels
-    let cuda_src = PathBuf::from("src/cuda/kernels/my_struct_kernel.cu");
-    let ptx_file = out_dir.join("my_struct_kernel.ptx");
+    let cuda_src = PathBuf::from("src/cuda_kernel.cu");
+    let ptx_file = out_dir.join("cuda_kmer_bit_pack_mmhash.ptx");
 
     // Specify the desired architecture version.
     let arch = "compute_86"; // For example, using SM 8.6 (Ampere architecture).
@@ -37,11 +37,10 @@ fn main() {
 
     // The bindgen::Builder is the main entry point
     // to bindgen, and lets you build up options for
-    // the resulting bindings.
     let bindings = bindgen::Builder::default()
         // The input header we would like to generate
         // bindings for.
-        .header("src/cuda/includes/wrapper.h")
+        .header("src/cuda_kernel.h")
         // Tell cargo to invalidate the built crate whenever any of the
         // included header files changed.
         .parse_callbacks(Box::new(CargoCallbacks))

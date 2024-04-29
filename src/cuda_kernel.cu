@@ -1,4 +1,4 @@
-// #include "../includes/my_struct.h"
+#include "cuda_kernel.h"
 
 extern "C" __device__ uint64_t mmhash_u64(uint64_t key) {
   key = ~key + (key << 21);
@@ -11,11 +11,11 @@ extern "C" __device__ uint64_t mmhash_u64(uint64_t key) {
   return key;
 }
 
-extern "C" __global__ void
-my_struct_kernel(char *seq, const size_t n, const size_t n_per_thread,
-                 const size_t n_hash_per_thread, const size_t ksize,
-                 const uint64_t threshold, const bool canonical,
-                 const uint8_t *seq_nt4_table_ext, uint64_t *kmer_scaled_hash) {
+extern "C" __global__ void cuda_kmer_bit_pack_mmhash(
+    char *seq, const size_t n_bps, const size_t n_kmer_per_thread,
+    const size_t n_hash_per_thread, const size_t ksize,
+    const uint64_t threshold, const bool canonical,
+    const uint8_t *seq_nt4_table_ext, uint64_t *kmer_scaled_hash) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
   // copy table to shared memory
@@ -27,7 +27,7 @@ my_struct_kernel(char *seq, const size_t n, const size_t n_per_thread,
 
   // Each thread only processes n_per_thread kmers
   // BPs that each thread accesses
-  size_t access_per_thread = n_per_thread + ksize - 1;
+  size_t access_per_thread = n_kmer_per_thread + ksize - 1;
 
   // Each kmer starts from (tid) to () in the seq
   uint64_t cur_kmer_fwd = 0, cur_kmer_rev = 0;
@@ -35,15 +35,13 @@ my_struct_kernel(char *seq, const size_t n, const size_t n_per_thread,
   uint64_t kmer_hash;
   size_t shift = (ksize - 1) * 2;
 
-  size_t start_idx = tid * n_per_thread;
-  size_t end_idx = start_idx + min(access_per_thread, n - start_idx);
+  size_t start_idx = tid * n_kmer_per_thread;
+  size_t end_idx = start_idx + min(access_per_thread, n_bps - start_idx);
 
   size_t i, l, cnt = 0;
   for (i = start_idx, l = 0; i < end_idx; i++) {
-    if (i < n) {
+    if (i < n_bps) {
       uint8_t c = seq_nt4_table[seq[i]];
-
-      // seq[i] = c;
 
       // valid base
       if (c < 4) {
